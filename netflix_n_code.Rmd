@@ -1,0 +1,566 @@
+---
+title: "Netflix and Code"
+author: "Olivia Ramos"
+date: "2023-04-01"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '3'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_depth: 3
+---
+
+[![Source](https://media.distractify.com/brand-img/LfMDZN4Kb/1440x753/best-netflix-original-series-2022-1672242316770.jpg)](https://www.distractify.com/p/best-netflix-original-series-2022){width="70%"} Source: [distractify.com](https://www.distractify.com/p/best-netflix-original-series-2022)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Overview
+
+The **Netflix TV Shows and Movies** dataset is adapted from [Kaggle](https://www.kaggle.com/datasets/victorsoeiro/netflix-tv-shows-and-movies), it includes two files **credits.csv** and **titles.csv** which are used in this work for data exploration.
+
+-   titles.csv contains information of unique show/movie titles
+
+-   credits.csv contains the information of actors/directors in each corresponding title
+
+    -   *actors and directors can have a role in one or more motion pictures*
+
+This dataset was chosen for its flexibility, as it has sufficient information to analyze the data in varying ways. For instance, one can determine attribute distributions, trends and predictions, differentiation, and so forth. Moreover, this dataset stands out because it offers new and exciting insights into the framework of a widely-used platform like Netflix (i.e., a favoured pastime of many individuals). In this work, I will be demonstrating geographic mapping, attribute counts, query-like sub-setting, top films/actors, and the relationship between attributes.
+
+**titles.csv** attributes:
+
+-   id[^1]
+-   title
+-   show_type[^2]
+-   description
+-   release_year
+-   age_certification
+-   runtime
+-   genres
+-   production_countries
+-   seasons[^3]
+-   imdb_id[^4]
+-   imdb_score
+-   imdb_votes
+-   tmdb_popularity[^5]
+-   tmdb_score
+
+[^1]: The title ID on [JustWatch](https://www.justwatch.com/)
+
+[^2]: SHOW or MOVIE
+
+[^3]: The number of seasons of a show
+
+[^4]: The IMDb ID on [IMDb](https://www.imdb.com/)
+
+[^5]: The TMDB rating on [TMDB](https://www.themoviedb.org/?language=en-CA)
+
+**credits.csv** attributes:
+
+-   person_id
+-   id
+-   name
+-   character
+-   role[^6]
+
+[^6]: ACTOR or DIRECTOR
+
+Libraries used in this work:
+
+```{r libraries, echo=TRUE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+library(countrycode)
+library(maps)
+library(RColorBrewer)
+library(ggmosaic)
+library(flextable)
+```
+
+### The *Fun* Stuff
+
+```{r load_titles, echo=TRUE, message=FALSE, cache=TRUE}
+# Load data
+titles <- read_csv("titles.csv")
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+glimpse(titles)
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+head(titles, 4)
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+# Find duplicate data
+sum(duplicated(titles))
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+# Consider the the magnitude of `NA` values in each attribute
+colSums(is.na(titles))
+```
+
+Since our dataset only contains two types of motion pictures, let's consider the proportion of movies vs. TV shows using `prop.table()`[^7] while resisting the urge to use a *pie chart*:
+
+[^7]: The function calculates the value of each entry in a table as a proportion of all values
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+titles |> 
+  count(type) |> 
+  mutate(pct = scales::percent(prop.table(n)))
+```
+
+What is the difference between **IMDb** and **TMDB** scores across each type?
+
+```{r score-wars, echo=TRUE, include=TRUE, cache=TRUE}
+diff <- titles |> 
+  select(type, imdb_score, tmdb_score) |> 
+  group_by(type) |> 
+  summarise(imdb_avg_score = mean(imdb_score, na.rm = TRUE),
+            tmdb_avg_score = mean(tmdb_score, na.rm = TRUE)) |> 
+  mutate(difference = scales::percent((tmdb_avg_score-imdb_avg_score)/imdb_avg_score))
+diff
+```
+
+TMDB is less of a critic...
+
+### The Production Countries of Netflix Titles
+
+Since the `production_countries` column looks like this:
+
+```{r, echo=FALSE, include=TRUE, cache=TRUE}
+head(titles$production_countries, 5)
+```
+
+I will be simply doing *this*:
+
+```{r country_string_count, echo=TRUE, include=TRUE, cache=TRUE}
+# Extract all strings in production countries
+countries <- titles$production_countries |> 
+  str_extract_all("[A-Z]+") |> 
+  unlist(recursive = TRUE)
+
+# Create data frame of country counts
+country_count <- as.data.frame(countries) |> 
+  count(countries, sort = TRUE)
+
+head(country_count, 5)
+```
+
+I am using the package [countrycode](https://cran.r-project.org/web/packages/countrycode/countrycode.pdf) to map the country abbreviations to a region. This mapping will allow me to merge with `map_data("world")`:
+
+```{r countrycode, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE}
+# Create new column of regions
+country_names <- country_count |> 
+  mutate(region = countrycode(sourcevar = country_count$countries, "iso2c", "country.name")) |> 
+  drop_na() |> 
+  rename("total" = "n")
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+head(country_names, 5)
+```
+
+### Creating a Data Frame of Map Data
+
+Using the package [maps](https://eriqande.github.io/rep-res-web/lectures/making-maps-with-R.html#:~:text=The%20maps%20package%20contains%20a,maps%20in%20the%20maps%20package.), I will join my `country_names` dataset with the `world` dataset from the package.
+
+```{r load_world, echo=TRUE, include=TRUE, cache=TRUE}
+world <- map_data("world")
+head(world, 3)
+```
+
+The following code is adapted from **Sarah Penir's** article: [Making Maps with ggplot2](https://sarahpenir.github.io/r/making-maps/)
+
+```{r set_difference, echo=TRUE, include=TRUE, cache=TRUE}
+# Determine the set difference between the two datasets on 'region'
+setdiff(country_names$region, world$region) |> print()
+```
+
+We need `country_names$region` to match `world$region` in order to do the join, so I will recode the mismatched strings:
+
+```{r recode, echo=TRUE, include=TRUE, cache=TRUE}
+# Recoding the 'region' column
+tedious <- country_names |> 
+  mutate(region = recode(str_trim(region),
+                         "United States" = "USA",
+                         "United Kingdom" = "UK",
+                         "Hong Kong SAR China" = "China",
+                         "Palestinian Territories" = "Palestine",
+                         "Czechia" = "Czech Republic",
+                         "British Indian Ocean Territory" = "UK", # ???
+                         "Congo - Kinshasa" = "Democratic Republic of the Congo",
+                         "St. Kitts & Nevis" = "Nevis",
+                         "Vatican City" = "Vatican"))
+```
+
+I am going to bin each country's production counts before plotting:
+
+```{r cut, echo=TRUE, include=TRUE, cache=TRUE}
+tedious <- tedious |> 
+  mutate(Productions = cut(total, seq(0, 2400, 200), dig.lab = 5))
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+head(tedious, 5)
+```
+
+Before we proceed with the join, let's determine the set difference once again:
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+setdiff(tedious$region, world$region) |> print()
+```
+
+```{r world_join, echo=TRUE, include=TRUE, cache=TRUE}
+sub <- left_join(world, tedious, by = "region")
+```
+
+### Visualizing the Global Production Count
+
+```{r visual_map, echo=TRUE, include=TRUE, cache=TRUE, out.width="100%", fig.cap="Fig 1. Count of motion pictures produced by country."}
+pinks <- c("#FBE6C5FF","#F5BA98FF", "#FA8A76FF", "#C8586CFF", "#70284AFF")
+
+theme1 <- theme(plot.title = element_text(hjust = 0.5),
+                panel.background = element_rect(fill = "white"),
+                panel.border = element_blank(),
+                panel.grid = element_blank(),
+                axis.title = element_blank(),
+                axis.text = element_blank(),
+                axis.line = element_blank(),
+                axis.ticks = element_blank())
+
+w_pc <- ggplot(sub, aes(x = long, y = lat, group = group)) + 
+  coord_fixed(1.3) +
+  ylim(-55, 84) +
+  geom_polygon(aes(fill = Productions), color = "white") +
+  scale_fill_manual(values = pinks, na.value = "lavenderblush3") +
+  theme1 +
+  labs(title = "Global Production Count")
+
+w_pc
+```
+
+As we can see, the United States produced the most motion pictures (2200+), followed by India (600+) then the United Kingdom.
+
+### Visualizing the Distribution of Genres
+
+```{r genre_string_count, echo=TRUE, include=TRUE, cache=TRUE}
+# Extract all strings in genre column
+genres <- titles$genres |> 
+  str_extract_all("[a-z]+") |> 
+  unlist(recursive = TRUE)
+
+genre_count <- as.data.frame(genres) |> 
+  count(genres, sort = TRUE) |> 
+  mutate(pct = prop.table(n))
+
+head(genre_count)
+```
+
+```{r visual_genre, echo=TRUE, include=TRUE, warning=FALSE, cache=TRUE, out.width="90%", fig.cap="Fig 2. The distribution of unique genres on Netflix."}
+# Extend colour palette
+extendo <- colorRampPalette(brewer.pal(12, "Set3"))(nrow(genre_count))
+
+theme2 <- theme(legend.position = "none",
+                panel.grid.major.x = element_line(colour = "ivory2"),
+                panel.grid.minor.x = element_line(colour = "white"),
+                panel.background = element_rect(fill = "white"),
+                plot.title = element_text(hjust = 0.5),
+                axis.title.x = element_text(margin = margin(t = 20)),
+                axis.title.y = element_blank())
+                                             
+# Plotting time
+g <- ggplot(genre_count, aes(x = reorder(genres, n), y = n, fill = genres)) +
+     geom_bar(stat = "identity") +
+     coord_flip() +
+     scale_fill_manual(values = extendo) +
+     geom_text(size = 3.5, 
+               hjust = "inward",
+               aes(label = scales::percent(pct, accuracy = 0.1))) + 
+     scale_y_continuous(breaks = scales::breaks_extended(n = 9),
+                        labels = scales::label_comma()) +
+     labs(title = "The Distribution of Genres on Netflix",
+          y = "Count") +
+  theme2 
+
+g
+```
+
+Drama dramatically accounts for nearly 20% of titles on Netflix. It is also funny how comedy is nearly double the proportion of the two genres preceding it!
+
+### Exploring Two Datasets with One Code
+
+```{r load_credits, echo=TRUE, message=FALSE, cache=TRUE}
+# Load some more data
+credits <- read_csv("credits.csv")
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+glimpse(credits)
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+head(credits, 4)
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+sum(duplicated(credits))
+```
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+colSums(is.na(credits))
+```
+
+Moving on to merging **titles.csv** and **credits.csv**:
+
+```{r credits_join, echo=TRUE, include=TRUE, cache=TRUE}
+# Merge on matching attribute column 'id'
+friends <- left_join(credits, titles, by = "id")
+```
+
+I am creating a list of the top movie actors on the basis that they played a role in at least **3** movies with an average rating greater than **7**:
+
+```{r actor_query, echo=TRUE, include=TRUE, cache=TRUE}
+# Filter the movies by the biggest production country and a score > 7 
+p1 <- friends |> 
+  filter(str_detect(production_countries, "US")) |>
+  mutate(avg_score = (tmdb_score + imdb_score) / 2 ) |> 
+  filter(avg_score >= 7 & type == "MOVIE")
+
+# Filter with actors appearing at least 3 times
+p2 <- p1 |> 
+  group_by(person_id) |> 
+  filter(sum(role %in% "ACTOR") >= 3) |> 
+  select(person_id, name, title, avg_score) 
+
+# Get the actors   
+p3 <- p2 |> 
+  select(person_id, name, title, avg_score) |> 
+  group_by(name) |>
+  summarise(potential = mean(avg_score)) |> 
+  arrange(desc(potential))  
+
+head(p3, 5)
+```
+
+```{r top10, echo=TRUE, include=TRUE, cache=TRUE}
+# Extract top 10 rows
+top10 <- p3 |> slice(1:10)
+```
+
+#### The Highest Rated Movie of the Top 10 Actors
+
+We can format data frames nicely with the [flextable](https://ardata-fr.github.io/flextable-book/) package:
+
+```{r top10_table, echo=TRUE, include=TRUE, cache=TRUE, warning=FALSE, message=FALSE}
+q1 <- filter(p2, name %in% top10$name) |> 
+      group_by(name) |> 
+      filter(avg_score == max(avg_score)) |> 
+      rename("Movie Score" = avg_score,
+             "Actor" = name,
+             "Top Film" = title) |> 
+      mutate_if(is.numeric, round, digits = 2)
+
+flextable::flextable(q1[,2:4], cwidth = c(2, 2, 2))
+```
+
+#### The Highest Rated Movies of the Top 10 Actors
+
+```{r top10_cooler_table, echo=TRUE, include=TRUE, cache=TRUE}
+# Listing all the movies
+q2 <- filter(p2, name %in% top10$name) |>
+      group_by(name) |>  
+      summarize(title = paste(sort(unique(title)), collapse = ", ")) 
+
+q3 <- left_join(top10, q2, by = "name")
+
+# Create column of total movies
+q3$movie_count <- str_count(q3$title, ",") + 1 
+  
+q4 <- q3 |> 
+  rename("Total" = movie_count,
+         "Actor" = name,
+         "Top Films" = title,
+         "Avg. Movie Score" = potential) |> 
+  mutate_if(is.numeric, round, digits = 2)
+
+flextable::flextable(q4[order(-q4$Total),], cwidth = c(1, 1, 6, 1))
+```
+
+The actors starring in the top movies are generally those who are in the **same** set of movies.
+
+Just for fun, let's see the rating for a great actor and director:
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+friends |> 
+  filter(name == "Keanu Reeves" | name == "Quentin Tarantino") |> 
+  group_by(name) |> 
+  summarise(rating = mean(imdb_score))
+```
+
+*disappointing*...
+
+### Finding the Unnecessarily Long Titles on Netflix
+
+```{r title_query, echo=TRUE, include=TRUE, cache=TRUE}
+too_long <- titles |> 
+  group_by(title) |> 
+  summarise(runtime = max(runtime)) |> 
+  arrange(desc(runtime)) |> 
+  slice(1:20)
+
+too_long <- too_long |>   
+  mutate(hours = runtime/60,
+         title = fct_reorder(title, hours)) |> 
+  rename("Runtime (hours)" = hours,
+         "Runtime (mins)" = runtime,
+         "Motion Picture" = title) |> 
+  mutate_if(is.numeric, round, digits = 1)
+
+flextable::flextable(too_long, cwidth = c(2, 2, 2))  
+```
+
+### Visualizing the Top Netflix Titles
+
+```{r count, echo=TRUE, include=TRUE, cache=TRUE}
+# Finding the counts per year
+titles |> 
+  count(release_year) |> 
+  arrange(desc(n))
+```
+
+Since 2019-2021 has the most releases, I will explore a subset of the data:
+
+```{r visual_top20, echo=TRUE, include=TRUE, warning=FALSE, message=FALSE, cache=TRUE, out.width="90%", fig.cap="Fig 3. Top 20 titles on Netflix produced in the U.S. from 2019-2022."}
+# Subsetting by year and the biggest production country
+top_titles <- titles |>  
+  filter(release_year >= 2019, 
+         str_detect(production_countries, "US")) |> 
+  arrange(desc(imdb_score)) |> 
+  slice(1:20)
+
+
+top_titles |> 
+  mutate(title = fct_reorder(title, imdb_score)) |> 
+  ggplot(mapping = aes(x = imdb_score, y = title, group = 1, 
+                       color = type, label = round(imdb_score, 2))) +
+  geom_segment(aes(x = 8, xend = imdb_score, yend = title), size = 0.9) +
+  geom_point(size = 4) +
+  scale_colour_manual(values = c("#FA7E5CFF", "#D17DF9FF"), name = "Type") +
+  scale_x_continuous(breaks = seq(8.0, 9.2, 0.2), limits = c(8.0, 9.2)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.title.y = element_blank(),
+        legend.position = c(0.9, 0.2)) +
+  labs(title = "Top 20 Motion Pictures from 2019-2022",
+       x = "IMDb Score")
+
+```
+
+### Visualizing Rating vs. Runtime
+
+I am separating the data into show releases before and after 2000. For simplicity, I am categorizing the data as pre/post Gen z. *I am aware* that Gen Z starts from 1997...
+
+```{r mutations_of_today, echo=TRUE, include=TRUE, cache=TRUE}
+# Filter and categorize data
+rnr <- titles |>  
+  filter(type == "SHOW") |> 
+  mutate(turning_point = factor(release_year < 2000, 
+                                levels = c(TRUE, FALSE),
+                                labels = c("Pre Gen Z", "Post Gen Z")), 
+         mins = cut(runtime, breaks = c(0, 30, 60, 100),
+                      labels = c("Short\n (up to 30)", "Long\n (up to 60)", 
+                                 "Too long\n (up to 100)"), na.rm = TRUE),
+         rating = cut(imdb_score, breaks = 4, 
+                      labels = c("Horrible", "Bad", "Okay", 
+                                 "Good"), na.rm = TRUE))
+```
+
+Using the [ggmosaic](https://cran.r-project.org/web/packages/ggmosaic/ggmosaic.pdf) package to plot:
+
+```{r visual_runtime_rating, echo=TRUE, include=TRUE, warning=FALSE, out.width="90%", cache=TRUE, fig.cap="Fig 4. The distribution of the number of ratings and runtime of shows released before and after year 2000."}
+traffic_lights <- c("#CF597EFF", "#DE8A5AFF", "#E9E29CFF", "#9CCB86FF")
+
+theme3 <- theme(plot.title = element_text(hjust = 0.5),
+                plot.background = element_blank(),
+                panel.background = element_blank(),
+                panel.border = element_blank(),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                strip.background = element_blank(),
+                strip.text = element_text(face = "italic"),
+                axis.title.x = element_text(vjust = -1.2)) 
+
+mos <- ggplot(rnr) +
+  geom_mosaic(aes(x = product(mins), fill = rating), 
+              na.rm = TRUE, offset = 0, show.legend = FALSE) +
+  facet_grid(.~turning_point, scales = "free_x") +
+  scale_fill_manual(values = traffic_lights) +
+  theme3 +
+  labs(title = "The Distribution of Rating and Runtime",
+       x = "Runtime (mins)",
+       y = "Rating")
+
+mos
+```
+
+As we can see, the majority of shows released before 2000 are under 30 minutes, with a small portion of shows ranging from 30-60 minutes. In contrast, after 2000, we can see that we have a larger majority of shows up to 60 minutes in length, and shows over 1 hour in runtime begin to appear. Although the runtime and rating do not have a strong correlation, we can see that the addition of more shows in post *Gen Z* account for more **bad** ratings and less **horrible** ratings.
+
+### Visualizing the Runtime Over the Years
+
+```{r, echo=TRUE, include=TRUE, cache=TRUE}
+titles$release_year |> range()
+```
+
+Finding the average runtime across each type over the year range:
+
+```{r average, echo=TRUE, include=TRUE, cache=TRUE}
+# Store avg. runtime mean of movies and shows 
+runtime_mean <- titles |> 
+  group_by(type) |> 
+  summarise(r_mean = mean(runtime, na.rm = TRUE)) |> 
+  print()
+```
+
+How does the runtime of TV shows and movies change over the years?
+
+```{r visual_runtime_year, fig.cap = "Fig 5. The changes in runtime of shows and movies by release year from 1970-2022.", echo=TRUE, include=TRUE, warning=FALSE, cache=TRUE, out.width="90%"}
+# Plot with y-line representing the mean runtime
+rs <- ggplot(titles, aes(x = release_year, y = runtime, colour = type)) +
+  geom_point(aes(colour = type, alpha = 0.5)) +
+  geom_smooth(method = "loess", span = 0.7, show.legend = FALSE) +
+  geom_hline(data = runtime_mean, aes(yintercept = r_mean, col = type),
+             linetype = "solid", size = 1, color = c("black")) +
+  scale_x_continuous(breaks = seq(1970, 2020, 10), limits = c(1970, 2022)) +
+  scale_colour_manual(values = c("coral", "mediumorchid")) +
+  facet_wrap(.~type, scales = "free_y") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, vjust = 1.2),
+        axis.title.x = element_text(vjust = -1.2),
+        legend.position = "none") +
+  labs(x = "Release Year", 
+       y = "Runtime (mins)", 
+       colour = "Type",
+       title = "Runtime of Motion Pictures by Year")
+
+rs 
+```
+
+-   In this visual, I have used a loess regression line[^8] to fit the scattered data points.
+-   I have also included a black `geom_hline()` on the y-axis to represent the average runtime for each facet.
+-   Evidently, **movies** released from 1970-2010 are longer than the total average runtime. The runtime peaks around 2000 and by \~2015, the runtime falls below the average and increases again closer to 2022.
+-   In contrast, we can see that the runtime for **TV shows** gradually increases around the year 2000 and surpasses the average as we get closer to 2020.
+-   If we compare this observation to **Fig 4.** in [Visualizing Rating vs. Runtime], the facet for runtime after year 2000 conveys the same trend: a significant portion of TV shows released after 2000 have longer runtimes (around 60 minutes).
+
+[^8]: Locally weighted smoothing: used in regression analysis to fit a line through a plot (e.g. scatter) to define a relationship between attributes and predict trends
+
+### References
+
+1.  **Dataset:** Soeiro, V. (2022, July 26). Netflix TV shows and Movies. Kaggle. Retrieved March 29, 2023, from <https://www.kaggle.com/datasets/victorsoeiro/netflix-tv-shows-and-movies>
+2.  **Source code for map plot:** Penir, S. (2019, January 6). Making maps with GGPLOT2. Sarah's Notes. Retrieved March 29, 2023, from <https://sarahpenir.github.io/r/making-maps/>
